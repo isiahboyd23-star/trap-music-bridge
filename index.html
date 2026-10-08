@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<!-- YouTube identifies the embedding site by the Referer header. This keeps the
+     browser default so this page's https address is sent (missing = Error 153). -->
+<meta name="referrer" content="strict-origin-when-cross-origin">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Trap RP music bridge</title>
+<style>
+    html, body { margin: 0; height: 100%; overflow: hidden; background: #000; }
+    #player { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; }
+    .status {
+        position: absolute; inset: 0;
+        display: grid; place-items: center;
+        padding: 24px; text-align: center;
+        color: #9a8e7a; background: #050403;
+        font: 15px/1.7 "Segoe UI", system-ui, sans-serif;
+    }
+    .status b { color: #d9a83c; }
+    .status code { color: #f3ece0; }
+</style>
+</head>
+<body>
+<div id="player"></div>
+<script>
+/* ------------------------------------------------------------------
+   trap_loadingscreen YouTube bridge
+
+   Host this file on any https:// site (GitHub Pages works) and put its
+   address in youtubeBridge in html/config.js. The loading screen embeds
+   this page and drives the YouTube player in it with postMessage.
+
+   FiveM serves loading screens from nui://, which YouTube rejects
+   (Error 153). From here YouTube sees this page's https address instead.
+   ------------------------------------------------------------------ */
+(function () {
+    'use strict';
+
+    var parentWin = window.parent;
+
+    // Opened directly in a browser: just confirm the page is reachable.
+    if (parentWin === window) {
+        document.body.innerHTML =
+            '<div class="status"><div><b>Music bridge is online.</b><br>' +
+            'Put this page\'s address in <code>youtubeBridge</code> in html/config.js ' +
+            'of trap_loadingscreen.</div></div>';
+        return;
+    }
+
+    var STATES = { '-1': 'unstarted', '0': 'ended', '1': 'playing', '2': 'paused', '3': 'buffering', '5': 'cued' };
+    var player = null;
+    var ready = false;
+    var lastTitle = '';
+    var ticker = null;
+    var wantVolume = 30;
+    var wantMuted = false;
+
+    function send(msg) {
+        msg.src = 'yt-bridge';
+        parentWin.postMessage(msg, '*');
+    }
+
+    function sendTime() {
+        send({ ev: 'time', cur: player.getCurrentTime() || 0, dur: player.getDuration() || 0 });
+    }
+
+    // YouTube can restore a remembered volume when a video loads, so the
+    // loading screen's volume is applied again once playback starts.
+    function applyVolume() {
+        player.setVolume(wantVolume);
+        if (wantMuted) { player.mute(); } else { player.unMute(); }
+    }
+
+    function onState(e) {
+        send({ ev: 'state', state: STATES[String(e.data)] || String(e.data) });
+
+        if (e.data === YT.PlayerState.PLAYING) {
+            applyVolume();
+            var data = player.getVideoData ? player.getVideoData() : null;
+            if (data && data.title && data.title !== lastTitle) {
+                lastTitle = data.title;
+                send({ ev: 'title', title: data.title });
+            }
+            if (!ticker) ticker = setInterval(sendTime, 500);
+        } else if (ticker) {
+            clearInterval(ticker);
+            ticker = null;
+        }
+    }
+
+    window.onYouTubeIframeAPIReady = function () {
+        player = new YT.Player('player', {
+            width: '100%',
+            height: '100%',
+            playerVars: {
+                autoplay: 1,
+                controls: 0,
+                disablekb: 1,
+                fs: 0,
+                rel: 0,
+                playsinline: 1,
+                modestbranding: 1,
+                cc_load_policy: 0,
+                iv_load_policy: 3,
+                origin: location.origin
+            },
+            events: {
+                onReady: function () {
+                    ready = true;
+                    send({ ev: 'ready' });
+                },
+                onStateChange: onState,
+                onError: function (e) { send({ ev: 'error', code: e.data }); }
+            }
+        });
+    };
+
+    // Commands from the loading screen. Only the page embedding this one
+    // can send them, and it queues everything until 'ready' is sent.
+    window.addEventListener('message', function (e) {
+        if (e.source !== parentWin || !ready) return;
+        var d = e.data;
+        if (!d || d.src !== 'trap_loadingscreen') return;
+
+        switch (d.cmd) {
+            case 'load':
+                lastTitle = '';
+                if (d.kind === 'playlist') {
+                    player.loadPlaylist({ list: String(d.id), listType: 'playlist', index: 0 });
+                } else {
+                    player.loadVideoById({ videoId: String(d.id), startSeconds: Number(d.start) || 0 });
+                }
+                break;
+            case 'play':
+                player.playVideo();
+                break;
+            case 'pause':
+                player.pauseVideo();
+                break;
+            case 'stop':
+                player.stopVideo();
+                break;
+            case 'volume':
+                wantVolume = Math.max(0, Math.min(100, Number(d.value) || 0));
+                player.setVolume(wantVolume);
+                break;
+            case 'mute':
+                wantMuted = !!d.value;
+                if (wantMuted) { player.mute(); } else { player.unMute(); }
+                break;
+            case 'seek':
+                player.seekTo(Number(d.value) || 0, true);
+                break;
+        }
+    });
+
+    // No YouTube API (blocked or offline) means no YouTube at all; tell the
+    // loading screen so it moves on to local files.
+    var api = document.createElement('script');
+    api.src = 'https://www.youtube.com/iframe_api';
+    api.onerror = function () { send({ ev: 'fatal', reason: 'YouTube API failed to load' }); };
+    document.head.appendChild(api);
+})();
+</script>
+</body>
+</html>
